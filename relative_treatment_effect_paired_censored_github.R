@@ -1,25 +1,16 @@
-# The following two lines must be executed only once.
-# This is necessary for using the Greenwood-type covariance estimators of the Aalen-Johansen estimators which are implemented in the github version.
-#library(devtools)
-#install_github("mclements/etm")
-
 library(copula)
 library(gumbel)
-library(etm)
 
-
-# function to randomize the dataset
-# n:     number of pairs
-# times: event or censoring times
-# cens:  censoring indicator: 1=uncensored, 0=censored
-# tau:   Late (but not too late) final evaluation time.
-#        Exceeding times are set to tau and uncensored.
+# Function to randomize the dataset
+# Given a sorted (artificial) competing risks data.frame
+# which contains the event time and status.
+# Effectively, onyl the status 1 and 2 will be randomized.
 #
-rand <- function(n, times1, cens1, times2, cens2, tau){
-  times <- c(times1, times2)
-  cens <- c(cens1, cens2)
-  G <- rbinom(n, 1, 0.5)
-  return(list(times1=times[(1:n)+n*G], cens1=cens[(1:n)+n*G], times2=times[(1:n)+n*(1-G)], cens2=cens[(1:n)+n*(1-G)]))
+rand.new <- function(dataset){
+  n.eff <- sum(dataset$status %in% c(1,2))
+  # randomly re-assign event types 1 and 2 
+  dataset[which(dataset$status %in% c(1,2)),2] <- rbinom(n.eff,1,0.5)+1
+  return(dataset)
 }
 
 # function to convert a paired censored dataset into a competing risks dataset
@@ -29,149 +20,228 @@ rand <- function(n, times1, cens1, times2, cens2, tau){
 # tau:   Late (but not too late) final evaluation time.
 #        Exceeding times are set to tau and uncensored.
 #
-paired2CR <- function(n, times1, cens1, times2, cens2, tau){
+paired2CR.new <- function(n, times1, cens1, times2, cens2, tau){
   times1 <- pmin(times1, tau)
   cens1[times1==tau] <- 1
   times2 <- pmin(times2, tau)
   cens2[times2==tau] <- 1
   times <- pmin(times1, times2)
   type <- ifelse((times1 < times2 & cens1) | (times1 == times2 & cens1 & !cens2), 1, 
-          ifelse((times2 < times1 & cens2) | (times1 == times2 & cens2 & !cens1), 2,
-          ifelse(times2 == times1 & cens1 & cens2, 3, "cens")))
-  return(data.frame(id = 1:n, from=0, to=type, time=times)) 
+                 ifelse((times2 < times1 & cens2) | (times1 == times2 & cens2 & !cens1), 2,
+                        ifelse(times2 == times1 & cens1 & cens2, 3, 0)))
+  return(data.frame(time=times, status=type)) 
+}
+
+
+
+# Actual function for computing the relative treatment effect estimator, 
+# and the corresponding variance estimator.
+#  dataf: a dataframe which is sorted according to the event times.
+rte <- function(dataf){
+  # unique sorted event times
+  times <- unique(dataf$time[dataf$status>0])
+  nt <- length(times)
+  
+  if(nt==0) return(c(0.5,999999999))
+  
+  atrisk <-  sapply(times, function(t) sum(dataf$time >= t))
+  dN1 <- sapply(times, function(t) sum(dataf$status[dataf$time == t]==1))
+  dN2 <- sapply(times, function(t) sum(dataf$status[dataf$time == t]==2))
+  dN3 <- sapply(times, function(t) sum(dataf$status[dataf$time == t]==3))
+  dN <- dN1+dN2+dN3
+  
+  # Kaplan-Meier estimator
+  S <- cumprod(1-dN/atrisk)
+  
+  # Aalen-Johansen estimators
+  # left-continuous version of Kaplan-Meier estimator in integral
+  F1 <- cumsum(c(1,S[-nt]) * dN1/atrisk)
+  F2 <- cumsum(c(1,S[-nt]) * dN2/atrisk)
+  F3 <- cumsum(c(1,S[-nt]) * dN3/atrisk)
+  
+  num1 <- (atrisk - dN1)*dN1
+  num2 <- (atrisk - dN2)*dN2
+  num3 <- (atrisk - dN3)*dN3
+  atriskMdN  <- atrisk - dN
+  denom <- 1/(atrisk*atriskMdN^2)
+  w1 <- num1*denom
+  w2 <- num2*denom
+  w3 <- num3*denom
+  
+  # Most likely, some truncation at tau, i.e., type3 event and NAE-jump of size 1 for type 3.
+  # Also, assumed no atom at tau for the event times.
+  if(dN[nt] == atrisk[nt]){
+    var1 <- sum((F1[-nt]+S[-nt]-F1[nt-1])^2 * w1[-nt] + (F1[-nt]-F1[nt-1])^2 * (w2[-nt]+w3[-nt]))
+    var2 <- sum((F2[-nt]+S[-nt]-F2[nt-1])^2 * w2[-nt] + (F2[-nt]-F2[nt-1])^2 * (w1[-nt]+w3[-nt]))
+    cov12 <- sum((F2[nt-1]-F2[-nt])*(F1[nt-1]-F1[-nt]) * w3[-nt] - (S[-nt]+F2[-nt]-F2[nt-1])*(F1[nt-1]-F1[-nt])*w2[-nt] - (S[-nt]+F1[-nt]-F1[nt-1])*(F2[nt-1]-F2[-nt])*w1[-nt])
+    return(c(F2[nt] + 0.5*F3[nt], 0.25*var1 + 0.25*var2 - 0.5*cov12))
+  }else{
+    var2 <- sum((F2+S-F2[nt])^2 * w2 + (F2-F2[nt])^2 * (w1+w3))
+    var3 <- sum((F3+S-F3[nt])^2 * w3 + (F3-F3[nt])^2 * (w1+w2))
+    cov23 <- sum((F2[nt]-F2)*(F3[nt]-F3) * w1 - (S+F2-F2[nt])*(F3[nt]-F3)*w2 - (S+F3-F3[nt])*(F2[nt]-F2)*w3)
+    return(c(F2[nt] + 0.5*F3[nt], var2 + 0.25*var3 + cov23))
+  }
 }
 
 
 # function to compute the relative treatment effect, variance estimate, 
-#     p-values, confidence intervals
-# n:     number of pairs
-# times: event or censoring times
-# cens:  censoring indicator: 1=uncensored, 0=censored
-# tau:   Late (but not too late) final evaluation time.
-#        Exceeding times are set to tau and uncensored.
-# alpha: nominal significance level
-# BS.iter: number of bootstrap and randomization iterations.
+#         p-values, confidence intervals
+# n:          number of pairs
+# times:      event or censoring times
+# cens:       censoring indicator: 1=uncensored, 0=censored
+# tau:        Late (but not too late) final evaluation time.
+#             Exceeding times are set to tau and uncensored.
+# alpha:      nominal significance level
+# BS.iter:    number of bootstrap and randomization iterations.
+# test.bool:  boolean. The tests will only be conducted when TRUE
+# ci.bool:    boolean. The confidence intervals will only be computed when TRUE
+# alt:        specifies the type of hypothesis test and confidence intervals.
+#             Either of "two.sided" (default), "greater", or "less".
+#             For more details, see the functions  one.test()  and  one.ci()  below.
 #
-rel_treat_eff <- function(n, times1, cens1, times2, cens2, tau, alpha=0.05, BS.iter=100){
-  dataset <- paired2CR(n, times1, cens1, times2, cens2, tau)
-  tra <- matrix(ncol=4,nrow=4,FALSE)
-  tra[1,2:4] <- TRUE
+rel_treat_eff.new <- function(n, times1, cens1, times2, cens2, tau, alpha=0.05, BS.iter=100, test.bool=FALSE, ci.bool=FALSE, alt="two.sided"){
+  dataset <- paired2CR.new(n, times1, cens1, times2, cens2, tau)
+  dataset <- dataset[order(dataset$time),]
   
-  etm_complete <- etm(data=dataset, state.names=0:3, tra=tra, cens.name="cens", s=0, t=tau, covariance=TRUE)
+  rte_cov <- rte(dataset)
   
-  if(is.null(etm_complete$cov)) return(list(RTE=0.5, RTE.var=0, 
-                                            p.val.gauss=1, CI.gauss = c(0, 0), 
-                                            p.val.rand=1, CI.rand = c(0, 0),
-                                            p.val.bs=1, CI.bs = c(0, 0),
-                                            p.val.phi.gauss=1, CI.phi.gauss = c(0, 0), 
-                                            p.val.phi.rand=1, CI.phi.rand = c(0, 0),
-                                            p.val.phi.bs=1, CI.phi.bs = c(0, 0)))
+  if(! alt %in% c("two.sided", "greater", "less", "g", "l")){
+    print("Wrong specification of alt. Returning just the point and variance estimates.")
+    return(rte_cov)
+  }
   
-  latest <- length(etm_complete$est[1,1,])
-  
-  if(length(etm_complete$cov[1,1,latest-1])==0) return(list(RTE=0.5, RTE.var=0, 
-                                           p.val.gauss=1, CI.gauss = c(0, 0), 
-                                           p.val.rand=1, CI.rand = c(0, 0),
-                                           p.val.bs=1, CI.bs = c(0, 0),
-                                           p.val.phi.gauss=1, CI.phi.gauss = c(0, 0), 
-                                           p.val.phi.rand=1, CI.phi.rand = c(0, 0),
-                                           p.val.phi.bs=1, CI.phi.bs = c(0, 0)))
-  
-  p <- etm_complete$est[1,3,latest] + 0.5 * etm_complete$est[1,4,latest]
-  
-  # if p=0, don't reject; if p=1, reject one-sided test
-  if(p<0.000001)  return(list(RTE=p, RTE.var=0, 
-                p.val.gauss=1, CI.gauss = c(0, 0), 
-                p.val.rand=1, CI.rand = c(0, 0),
-                p.val.bs=1, CI.bs = c(0, 0),
-                p.val.phi.gauss=1, CI.phi.gauss = c(0, 0), 
-                p.val.phi.rand=1, CI.phi.rand = c(0, 0),
-                p.val.phi.bs=1, CI.phi.bs = c(0, 0)))
-  
-  if(abs(p-1)<0.000001)  return(list(RTE=p, RTE.var=0, 
-                p.val.gauss=0, CI.gauss = c(1, 1), 
-                p.val.rand=0, CI.rand = c(1, 1),
-                p.val.bs=0, CI.bs = c(1, 1),
-                p.val.phi.gauss=0, CI.phi.gauss = c(1, 1), 
-                p.val.phi.rand=0, CI.phi.rand = c(1, 1),
-                p.val.phi.bs=0, CI.phi.bs = c(1, 1)))
-  
-  
-  
-  # Indices in etm function:
-  # 1 for survival, 9 for 0->2 trans., 13 for 0->3 trans.
-  sigma2 <- 0.25*etm_complete$cov[1,1,latest-1] + etm_complete$cov[9,9,latest-1] + 0.25*etm_complete$cov[13,13,latest-1] + etm_complete$cov[1,9,latest-1] + etm_complete$cov[9,13,latest-1] + 0.25*etm_complete$cov[1,13,latest-1]
-  # Here we used the time index latest-1 because the last observation(s) is/are uncensored at tau.
-  # Hence, a jump with size S(tau-) occurs, where S is the Kaplan-Meier estimator.
-  
-  
-  # We wish to test the right-sided alternative p > 0.5.
-  # Thus reject for large values of test statistic T_0.
-  
-  # First, for the untransformed:
-  
-  T_0 <- (p-0.5)/sqrt(sigma2)
-  
-  if(is.na(T_0))  return(list(RTE=p, RTE.var=sigma2, 
-                p.val.gauss=1, CI.gauss = c(0, 1), 
-                p.val.rand=1, CI.rand = c(0, 1),
-                p.val.bs=1, CI.bs = c(0, 1),
-                p.val.phi.gauss=1, CI.phi.gauss = c(0, 1), 
-                p.val.phi.rand=1, CI.phi.rand = c(0, 1),
-                p.val.phi.bs=1, CI.phi.bs = c(0, 1)))
+  if(BS.iter==0) {
+    return(rte_cov)
+  }
 
-  # two-sided p-value
-  # p_val_gauss <- 2*pnorm(abs(T_0)) - 1
-  # 1-sided p-value (right-tailed)
-  p_val_gauss <- 1 - pnorm(T_0) 
-  CI_gauss_lower <- p - qnorm(1-alpha/2) * sqrt(sigma2)
-  CI_gauss_upper <- p + qnorm(1-alpha/2) * sqrt(sigma2)
+  if(rte_cov[1]<0.000001)  return(list(RTE=rte_cov[1], RTE.var=0, 
+                                       p.val.gauss=1, CI.gauss = c(0, 0), 
+                                       p.val.rand=1, CI.rand = c(0, 0),
+                                       p.val.bs=1, CI.bs = c(0, 0),
+                                       p.val.phi.gauss=1, CI.phi.gauss = c(0, 0), 
+                                       p.val.phi.rand=1, CI.phi.rand = c(0, 0),
+                                       p.val.phi.bs=1, CI.phi.bs = c(0, 0)))
+  
+  if(abs(rte_cov[1]-1)<0.000001)  return(list(RTE=rte_cov[1], RTE.var=0, 
+                                              p.val.gauss=0, CI.gauss = c(1, 1), 
+                                              p.val.rand=0, CI.rand = c(1, 1),
+                                              p.val.bs=0, CI.bs = c(1, 1),
+                                              p.val.phi.gauss=0, CI.phi.gauss = c(1, 1), 
+                                              p.val.phi.rand=0, CI.phi.rand = c(1, 1),
+                                              p.val.phi.bs=0, CI.phi.bs = c(1, 1)))
   
   # randomization
-  rand_p <- replicate(BS.iter, rand_rel_treat_eff(n, times1, cens1, times2, cens2, tau, p))
+  rand_p <- replicate(BS.iter, rand_rel_treat_eff.new(dataset))
   # bootstrap
-  bs_p <- replicate(BS.iter, bs_rel_treat_eff(n, times1, cens1, times2, cens2, tau, p))
+  bs_p <- replicate(BS.iter, bs_rel_treat_eff.new(dataset, n, rte_cov[1]))
+  
+  p_val_gauss <- 1
+  CI_gauss_lower <- 0
+  CI_gauss_upper <- 1
+  p_val_rand <- 1
+  CI_rand_lower <- 0
+  CI_rand_upper <- 1
+  p_val_bs <- 1
+  CI_bs_lower <- 0
+  CI_bs_upper <- 1
+  p_val_phi_gauss <- 1
+  CI_phi_gauss_lower <- 0
+  CI_phi_gauss_upper <- 1
+  p_val_phi_rand <- 1
+  CI_phi_rand_lower <- 0
+  CI_phi_rand_upper <- 1
+  p_val_phi_bs <- 1
+  CI_phi_bs_lower <- 0
+  CI_phi_bs_upper <- 1
   
   
-  # CIs: equal mass (i.e. mass alpha/2 to the left and to the right) 
-  # two-sided p-value
-  # p_val_rand <- 2*min(mean(rand_p[1,] <= T_0), mean(rand_p[1,] >= T_0))
-  # 1-sided p-value (right-tailed)
-  p_val_rand <- mean(rand_p[1,] >= T_0)
-  CI_rand_lower <- p - quantile(rand_p[1,], prob=1-alpha/2)*sqrt(sigma2)
-  CI_rand_upper <- p - quantile(rand_p[1,], prob=alpha/2)*sqrt(sigma2)
-
-  # two-sided p-value
-  # p_val_bs <- 2*min(mean(bs_p <= T_0), mean(bs_p >= T_0))
-  # 1-sided p-value (right-tailed)
-  p_val_bs <- mean(bs_p[1,] >= T_0)
-  CI_bs_lower <- p - quantile(bs_p[1,], prob=1-alpha/2)*sqrt(sigma2)
-  CI_bs_upper <- p - quantile(bs_p[1,], prob=alpha/2)*sqrt(sigma2)
-
+  if(test.bool){
+    T_0 <- (rte_cov[1]-0.5)/sqrt(rte_cov[2])
+    
+    # the studentization with 0.5*log(0.5) is probably much better than p*log(p)
+    # otherwise, for small or large values of p the test statistic could tend to have small values.
+    T_phi <- (log(-log(rte_cov[1]))-log(-log(0.5)))/sqrt(rte_cov[2])*rte_cov[1]*log(rte_cov[1])
+    
+    if(alt=="greater"  | alt=="g"){
+      # 1-sided p-values (right-tailed)
+      p_val_gauss <- 1 - pnorm(T_0) 
+      p_val_bs <- mean(bs_p[1,] >= T_0)
+      p_val_rand <- mean(rand_p[1,] >= T_0)
+      
+      # right because trafo phi is decreasing, but we also standardize with something negative.
+      p_val_phi_gauss <- 1-pnorm(T_phi)
+      p_val_phi_bs <- mean(bs_p[2,] >= T_phi)
+      p_val_phi_rand <- mean(rand_p[2,] >= T_phi)
+    }
+    
+    if(alt=="less"  | alt=="l"){
+      # 1-sided p-value (left-tailed)
+      p_val_gauss <- pnorm(T_0) 
+      p_val_bs <- mean(bs_p[1,] <= T_0)
+      p_val_rand <- mean(rand_p[1,] <= T_0)
+      
+      p_val_phi_gauss <- pnorm(T_phi)
+      p_val_phi_bs <- mean(bs_p[2,] <= T_phi)
+      p_val_phi_rand <- mean(rand_p[2,] <= T_phi)
+    }
+    
+    if(alt=="two.sided"){
+      # 2-sided p-values (two-tailed)
+      p_val_gauss <- 2*(1-pnorm(abs(T_0)))
+      p_val_bs <- 2*min(mean(bs_p[1,] <= T_0), mean(bs_p[1,] >= T_0))
+      p_val_rand <- 2*min(mean(rand_p[1,] <= T_0), mean(rand_p[1,] >= T_0))
+      
+      p_val_phi_gauss <- 2*(1-pnorm(abs(T_phi)))
+      p_val_phi_rand <- 2*min(mean(rand_p[2,] <= T_phi), mean(rand_p[2,] >= T_phi))
+      p_val_phi_bs <- 2*min(mean(bs_p[2,] <= T_phi), mean(bs_p[2,] >= T_phi))
+    }
+  }
   
-  # Now, for the log-log-transformation:
-  T_phi <- (log(-log(p))-log(-log(0.5)))/sqrt(sigma2)*p*log(p)
+  if(ci.bool){
+    
+    if(alt=="greater"  | alt=="g"){
+      # Confidence intervals ending at 1 to the right
+      CI_gauss_lower <- rte_cov[1] - qnorm(1-alpha) * sqrt(rte_cov[2])
+      CI_rand_lower <- rte_cov[1] - quantile(rand_p[1,], prob=1-alpha)*sqrt(rte_cov[2])
+      CI_bs_lower <- rte_cov[1] - quantile(bs_p[1,], prob=1-alpha)*sqrt(rte_cov[2])
+      
+      CI_phi_gauss_lower <- rte_cov[1]^exp(-qnorm(1-alpha)*sqrt(rte_cov[2])/rte_cov[1]/log(rte_cov[1]))
+      CI_phi_rand_lower <- rte_cov[1]^exp(-quantile(rand_p[2,], prob=1-alpha)*sqrt(rte_cov[2])/rte_cov[1]/log(rte_cov[1]))
+      CI_phi_bs_lower <- rte_cov[1]^exp(-quantile(bs_p[2,], prob=1-alpha)*sqrt(rte_cov[2])/rte_cov[1]/log(rte_cov[1]))
+    }
+    
+    if(alt=="less"  | alt=="l"){
+      # Confidence intervals ending at 0 to the left
+      CI_gauss_upper <- rte_cov[1] + qnorm(1-alpha) * sqrt(rte_cov[2])
+      CI_rand_upper <- rte_cov[1] - quantile(rand_p[1,], prob=alpha)*sqrt(rte_cov[2])
+      CI_bs_upper <- rte_cov[1] - quantile(bs_p[1,], prob=alpha)*sqrt(rte_cov[2])
+      
+      CI_phi_gauss_upper <- rte_cov[1]^exp(qnorm(1-alpha/2)*sqrt(rte_cov[2])/rte_cov[1]/log(rte_cov[1]))
+      CI_phi_rand_upper <- rte_cov[1]^exp(-quantile(rand_p[2,], prob=alpha/2)*sqrt(rte_cov[2])/rte_cov[1]/log(rte_cov[1]))
+      CI_phi_bs_upper <- rte_cov[1]^exp(-quantile(bs_p[2,], prob=alpha/2)*sqrt(rte_cov[2])/rte_cov[1]/log(rte_cov[1]))
+    }
+    
+    if(alt=="two.sided"){
+      # Confidence intervals with no restriction on any boundary
+      CI_gauss_lower <- rte_cov[1] - qnorm(1-alpha/2) * sqrt(rte_cov[2])
+      CI_gauss_upper <- rte_cov[1] + qnorm(1-alpha/2) * sqrt(rte_cov[2])
+      CI_rand_lower <- rte_cov[1] - quantile(rand_p[1,], prob=1-alpha/2)*sqrt(rte_cov[2])
+      CI_rand_upper <- rte_cov[1] - quantile(rand_p[1,], prob=alpha/2)*sqrt(rte_cov[2])
+      CI_bs_lower <- rte_cov[1] - quantile(bs_p[1,], prob=1-alpha/2)*sqrt(rte_cov[2])
+      CI_bs_upper <- rte_cov[1] - quantile(bs_p[1,], prob=alpha/2)*sqrt(rte_cov[2])
+      
+      CI_phi_gauss_lower <- rte_cov[1]^exp(-qnorm(1-alpha/2)*sqrt(rte_cov[2])/rte_cov[1]/log(rte_cov[1]))
+      CI_phi_gauss_upper <- rte_cov[1]^exp(qnorm(1-alpha/2)*sqrt(rte_cov[2])/rte_cov[1]/log(rte_cov[1]))
+      CI_phi_rand_lower <- rte_cov[1]^exp(-quantile(rand_p[2,], prob=1-alpha/2)*sqrt(rte_cov[2])/rte_cov[1]/log(rte_cov[1]))
+      CI_phi_rand_upper <- rte_cov[1]^exp(-quantile(rand_p[2,], prob=alpha/2)*sqrt(rte_cov[2])/rte_cov[1]/log(rte_cov[1]))
+      CI_phi_bs_lower <- rte_cov[1]^exp(-quantile(bs_p[2,], prob=1-alpha/2)*sqrt(rte_cov[2])/rte_cov[1]/log(rte_cov[1]))
+      CI_phi_bs_upper <- rte_cov[1]^exp(-quantile(bs_p[2,], prob=alpha/2)*sqrt(rte_cov[2])/rte_cov[1]/log(rte_cov[1]))
+    }
+    
+    
+  }
   
-  
-  # p-values for two-sided (non-randomized) tests: asymptotic, randomization, bootstrap.
-  # p_val_phi_gauss <- 2*pnorm(sqrt(n)*abs(T_phi)) -1
-  # p_val_phi_rand <- 2*min(mean(rand_p[2,] <= T_phi), mean(rand_p[2,] >= T_phi))
-  # p_val_phi_bs <- 2*min(mean(bs_p[2,] <= T_phi), mean(bs_p[2,] >= T_phi))
-  
-  # p-values for one-sided (right-tailed, non-randomized) tests: asymptotic, randomization, bootstrap.
-  p_val_phi_gauss <- 1-pnorm(T_phi)
-  p_val_phi_rand <- mean(rand_p[2,] >= T_phi)
-  p_val_phi_bs <- mean(bs_p[2,] >= T_phi)
-  
-  # two-sided confidence intervals
-  CI_phi_gauss_lower <- p^exp(-qnorm(1-alpha/2)*sqrt(sigma2)/p/log(p))
-  CI_phi_gauss_upper <- p^exp(qnorm(1-alpha/2)*sqrt(sigma2)/p/log(p))
-  CI_phi_rand_lower <- p^exp(-quantile(rand_p[2,], prob=1-alpha/2)*sqrt(sigma2)/p/log(p))
-  CI_phi_rand_upper <- p^exp(-quantile(rand_p[2,], prob=alpha/2)*sqrt(sigma2)/p/log(p))
-  CI_phi_bs_lower <- p^exp(-quantile(bs_p[2,], prob=1-alpha/2)*sqrt(sigma2)/p/log(p))
-  CI_phi_bs_upper <- p^exp(-quantile(bs_p[2,], prob=alpha/2)*sqrt(sigma2)/p/log(p))
-  
-  return(list(RTE=p, RTE.var=sigma2, 
+  return(list(RTE=rte_cov[1], RTE.var=rte_cov[2], 
               p.val.gauss=p_val_gauss, CI.gauss = c(CI_gauss_lower, CI_gauss_upper), 
               p.val.rand=p_val_rand, CI.rand = c(CI_rand_lower, CI_rand_upper),
               p.val.bs=p_val_bs, CI.bs = c(CI_bs_lower, CI_bs_upper),
@@ -182,75 +252,44 @@ rel_treat_eff <- function(n, times1, cens1, times2, cens2, tau, alpha=0.05, BS.i
 
 
 # function to randomize the dataset and then compute the normalized relative treatment effect
-rand_rel_treat_eff <- function(n, times1, cens1, times2, cens2, tau, p){
-  dataset_rand <- rand(n, times1, cens1, times2, cens2, tau)
-  dataset_rand <- paired2CR(n, dataset_rand$times1, dataset_rand$cens1, dataset_rand$times2, dataset_rand$cens2, tau)
-  tra <- matrix(ncol=4,nrow=4,FALSE)
-  tra[1,2:4] <- TRUE
-  etm_complete <- etm(data=dataset_rand, state.names=0:3, tra=tra, cens.name="cens", s=0, t=tau)
+rand_rel_treat_eff.new <- function(dataset){
+  rte_cov <- rte(rand.new(dataset))
   
-  if(is.null(etm_complete)) print("etm (rand) is NULL!")
-  if(is.null(etm_complete$cov)) return(c(0,0))
-  
-  latest <- length(etm_complete$est[1,1,])
-  
-  if(length(etm_complete$cov[1,1,latest-1])==0) return(c(0,0))
-  
-  p_rand <- etm_complete$est[1,3,latest] + 0.5 * etm_complete$est[1,4,latest]
-  sigma2_rand <- 0.25*etm_complete$cov[1,1,latest-1] + etm_complete$cov[9,9,latest-1] + 0.25*etm_complete$cov[13,13,latest-1] + etm_complete$cov[1,9,latest-1] + etm_complete$cov[9,13,latest-1] + 0.25*etm_complete$cov[1,13,latest-1]
-  
-  # If p_rand is very close to 0 or 1.
-  if(is.na((log(-log(p_rand))-log(-log(0.5)))/sqrt(sigma2_rand)*p_rand*log(p_rand))){
-    if(abs(sigma2_rand)<0.000001){
-      if(abs(p_rand-1) < 0.000001) return(c(Inf, Inf))
-      if(abs(p_rand) < 0.000001) return(c(-Inf, -Inf))
-      if(abs(p_rand-0.5) < 0.000001) return(c(0,0))
+  # If relative treatment effect is very close to 0 or 1.
+  if(is.na((log(-log(rte_cov[1]))-log(-log(0.5)))/sqrt(rte_cov[2])*rte_cov[1]*log(rte_cov[1]))){
+    if(abs(rte_cov[2])<0.000001){
+      if(abs(rte_cov[1]-1) < 0.000001) return(c(Inf, Inf))
+      if(abs(rte_cov[1]) < 0.000001) return(c(-Inf, -Inf))
+      if(abs(rte_cov[1]-0.5) < 0.000001) return(c(0,0))
     }else{
-      if(abs(p_rand-1) < 0.000001) return(c((p_rand-0.5)/sqrt(sigma2_rand), Inf))
-      if(abs(p_rand) < 0.000001) return(c((p_rand-0.5)/sqrt(sigma2_rand), -Inf))
+      if(abs(rte_cov[1]-1) < 0.000001) return(c((rte_cov[1]-0.5)/sqrt(rte_cov[2]), Inf))
+      if(abs(rte_cov[1]) < 0.000001) return(c((rte_cov[1]-0.5)/sqrt(rte_cov[2]), -Inf))
     }
   }
   # Return the untransformed and log-log-transformed standardized randomized relative treatment effect.
-  return(c((p_rand-0.5)/sqrt(sigma2_rand), (log(-log(p_rand))-log(-log(0.5)))/sqrt(sigma2_rand)*p_rand*log(p_rand)))
+  return(c((rte_cov[1]-0.5)/sqrt(rte_cov[2]), (log(-log(rte_cov[1]))-log(-log(0.5)))/sqrt(rte_cov[2])*rte_cov[1]*log(rte_cov[1])))
 }
 
 
 # function to bootstrap the dataset and then compute the normalized relative treatment effect
-bs_rel_treat_eff <- function(n, times1, cens1, times2, cens2, tau, p){
-  bs_indices <- sample(1:n,n,replace=TRUE)
-  times1_bs <- times1[bs_indices]
-  cens1_bs <- cens1[bs_indices]
-  times2_bs <- times2[bs_indices]
-  cens2_bs <- cens2[bs_indices]
-  dataset_bs <- paired2CR(n, times1_bs, cens1_bs, times2_bs, cens2_bs, tau)
-  tra <- matrix(ncol=4,nrow=4,FALSE)
-  tra[1,2:4] <- TRUE
-  etm_complete <- etm(data=dataset_bs, state.names=0:3, tra=tra, cens.name="cens", s=0, t=tau)
-  
-  if(is.null(etm_complete)) print("etm (bs) is NULL!")
-  if(is.null(etm_complete$cov)) return(c(0,0))
-  
-  latest <- length(etm_complete$est[1,1,])
-  
-  if(length(etm_complete$cov[1,1,latest-1])==0) return(c(0,0))
-  
-  p_bs <- etm_complete$est[1,3,latest] + 0.5 * etm_complete$est[1,4,latest]
-  sigma2_bs <- 0.25*etm_complete$cov[1,1,latest-1] + etm_complete$cov[9,9,latest-1] + 0.25*etm_complete$cov[13,13,latest-1] + etm_complete$cov[1,9,latest-1] + etm_complete$cov[9,13,latest-1] + 0.25*etm_complete$cov[1,13,latest-1]
-  
-  # if p_bs is very close to 0 or 1
-  if(is.na((log(-log(p_bs))-log(-log(p)))/sqrt(sigma2_bs)*p_bs*log(p_bs))){
-    if(abs(sigma2_bs)<0.000001){
-      if(abs(p_bs-1) < 0.000001) return(c(Inf, Inf))
-      if(abs(p_bs) < 0.000001) return(c(-Inf, -Inf))
-      if(abs(p_bs-p) < 0.000001) return(c(0,0))
+bs_rel_treat_eff.new <- function(dataset, n, p){
+  dataset <- dataset[sample(1:n,n,replace=TRUE),]
+  dataset <- dataset[order(dataset$time),]
+  rte_cov <- rte(dataset)
+
+  # If relative treatment effect is very close to 0 or 1.
+  if(is.na((log(-log(rte_cov[1]))-log(-log(p)))/sqrt(rte_cov[2])*rte_cov[1]*log(rte_cov[1]))){
+    if(abs(rte_cov[2])<0.000001){
+      if(abs(rte_cov[1]-1) < 0.000001) return(c(Inf, Inf))
+      if(abs(rte_cov[1]) < 0.000001) return(c(-Inf, -Inf))
+      if(abs(rte_cov[1]-p) < 0.000001) return(c(0,0))
     }else{
-      if(abs(p_bs-1) < 0.000001) return(c((p_bs-p)/sqrt(sigma2_bs), Inf))
-      if(abs(p_bs) < 0.000001) return(c((p_bs-p)/sqrt(sigma2_bs), -Inf))
+      if(abs(rte_cov[1]-1) < 0.000001) return(c((rte_cov[1]-p)/sqrt(rte_cov[2]), Inf))
+      if(abs(rte_cov[1]) < 0.000001) return(c((rte_cov[1]-p)/sqrt(rte_cov[2]), -Inf))
     }
-  }
-  
+  } 
   # Return the untransformed and log-log-transformed standardized bootstrapped relative treatment effect.
-  return(c((p_bs-p)/sqrt(sigma2_bs), (log(-log(p_bs))-log(-log(p)))/sqrt(sigma2_bs)*p_bs*log(p_bs)))
+  return(c((rte_cov[1]-p)/sqrt(rte_cov[2]), (log(-log(rte_cov[1]))-log(-log(p)))/sqrt(rte_cov[2])*rte_cov[1]*log(rte_cov[1])))
 }
 
 
@@ -333,7 +372,7 @@ settings <- matrix(c(
   byrow=T, nc=4)
 
 
-one.test <- function(itnr, B, alpha=0.05, n, setting=settings[18,], tau, X1=NULL, X2=NULL, d1=NULL, d2=NULL){
+  
   # Conducts the tests. Returns the value of the relative treatment effect estimator,
   # and the (one-sided) p-values for the asymptotic, randomization, bootstrap test
   # untransformed and log-log-transformed.
@@ -348,7 +387,12 @@ one.test <- function(itnr, B, alpha=0.05, n, setting=settings[18,], tau, X1=NULL
   # X2: (censored) times under treatment 2.
   # d1: uncensoring indicators for treatment 1.
   # d2: uncensoring indicators for treatment 2.
-  
+  # alt: the alternative hypothesis. Either of 
+  #     "two.sided" (default), i.e.,  H_a: relative treatment effect != 0.5,
+  #     "greater", i.e.,              H_a: relative treatment effect > 0.5,
+  #     "less", i.e.,                 H_a: relative treatment effect < 0.5.
+  #
+one.test <- function(itnr, B, alpha=0.05, n, setting=c(1,1,1,1), tau, X1=NULL, X2=NULL, d1=NULL, d2=NULL, alt="two.sided"){
   
   # data generation
   if(is.null(X1)){
@@ -364,23 +408,74 @@ one.test <- function(itnr, B, alpha=0.05, n, setting=settings[18,], tau, X1=NULL
     d2 <- ((X2==T2) | (X2==tau)) 
   }else{
     X1 <- pmin(X1,tau)
-    d1 <- (d1 | (X1==tau)) 
+    d1 <- (d1 | (X1==tau))
     X2 <- pmin(X2,tau)
     d2 <- (d2 | (X2==tau)) 
   }
   
-  results <- rel_treat_eff(n, times1=X1, cens1=d1, times2=X2, cens2=d2, tau=tau, alpha=alpha, BS.iter=B, plotting=FALSE)
+  results <- rel_treat_eff.new(n, times1=X1, cens1=d1, times2=X2, cens2=d2, tau=tau, alpha=alpha, BS.iter=B, test.bool=TRUE, ci.bool=FALSE, alt=alt)
   
   return(c(results[[1]], results[[3]], results[[5]], results[[7]], results[[9]], results[[11]], results[[13]]))
 }
 
 
-### For simulation of the data sets and conducting the tests.
+# Computes the confidence intervals. Returns the value of the relative treatment effect estimator,
+# and the (one-sided) p-values for the asymptotic, randomization, bootstrap-based
+# (1-alpha)x100% confidence intervals:  untransformed and log-log-transformed.
+# itnr: iteration number (in simulations)
+# B: number of bootstrap and randomization iterations
+# alpha: significance level
+# n: sample size
+# setting: a vector of size 4 which specifies the data generation.
+#           Possible choices are given in the vector settings.
+# tau: end of study time
+# X1: (censored) times under treatment 1; if NA, data will be generated.
+# X2: (censored) times under treatment 2.
+# d1: uncensoring indicators for treatment 1.
+# d2: uncensoring indicators for treatment 2.
+# factor1: a factor multiplied to the event times of treatment group 1 to create
+#   settings in which the relative treatment effect differs from 0.5.
+# alt: the type of confidence interval. Either of 
+#     "two.sided" (default), i.e.,  CI = [L,U],
+#     "greater", i.e.,              CI = [L,1],
+#     "less", i.e.,                 CI = [0,U].
+#
+one.CI <- function(itnr, B, alpha=0.05, n, setting=c(1,1,1,1), tau, X1=NULL, X2=NULL, d1=NULL, d2=NULL, alt="two.sided", factor1=1){
+
+    # data generation
+  if(is.null(X1)){
+    data <- dataGen(n, setting)
+    T1 <- data[,1] * factor1
+    C1 <- data[,3]
+    X1 <- pmin(T1,C1,rep(tau,n))
+    d1 <- ((X1==T1) | (X1==tau)) 
+    
+    T2 <- data[,2]
+    C2 <- data[,4]
+    X2 <- pmin(T2,C2,rep(tau,n))
+    d2 <- ((X2==T2) | (X2==tau)) 
+  }else{
+    X1 <- pmin(X1,tau)
+    d1 <- (d1 | (X1==tau)) 
+    X2 <- pmin(X2,tau)
+    d2 <- (d2 | (X2==tau)) 
+  }
+  
+  results <- rel_treat_eff.new(n, times1=X1, cens1=d1, times2=X2, cens2=d2, tau=tau, alpha=alpha, BS.iter=B, plotting=FALSE, test.bool=FALSE, ci.bool=TRUE, alt=alt)
+  
+  return(c(results[[4]], results[[6]], results[[8]], results[[10]], results[[12]], results[[14]], results[[3]], results[[5]], results[[7]], results[[9]], results[[11]], results[[13]], results[[1]]))
+}
+
+
+### For (parallel) simulation of the data sets and conducting the tests.
 if(FALSE){
   library(parallel)
+  
+  # under Linux/Unix:
   cl <- makeCluster(16, type="FORK", outfile="errors.txt")
+  # under Windows:
   #cl <- makeCluster(16, type="PSOCK", outfile="errors.txt")
-  clusterExport(cl=cl, c('dataGen', 'one.test', 'rgumbel', 'rCopula', 'claytonCopula', 'rel_treat_eff', 'paired2CR', 'etm', 'rand_rel_treat_eff', 'rand', 'bs_rel_treat_eff', 'rCopula', 'claytonCopula'))
+  clusterExport(cl=cl, c('dataGen', 'one.test', 'one.ci', 'rte', 'rgumbel', 'rCopula', 'claytonCopula', 'rel_treat_eff.new', 'paired2CR.new', 'rand_rel_treat_eff.new', 'rand.new', 'bs_rel_treat_eff.new', 'rCopula', 'claytonCopula'))
   # index for the specification of simulation setting
   index <- 4
   iseed <- round(123456+index*100)
@@ -423,34 +518,57 @@ if(FALSE){
 ### APPLICATION to diabetic retinopathy data set 
 
 if(FALSE){
-  library(timereg)
-  data(diabetes)
+  library(survival)
+  data(diabetic)
+  
+  diabetes <- diabetic
   
   # Y for young
   # A for adult
   
-  diabetesY <- subset(diabetes, adult == 1)
-  diabetesA <- subset(diabetes, adult == 2)
+  diabetesY <- subset(diabetes, age < 20)
+  diabetesA <- subset(diabetes, age >= 20)
   
-  treat.A <- diabetesA[2*(1:83)-1,]
-  untreat.A <- diabetesA[2*(1:83),]
+  # treated eyes
+  treat.A <- subset(diabetesA,trt==1)
+  untreat.A <- subset(diabetesA,trt==0)
   
-  timeA1 <- treat.A$time
-  statusA1 <- treat.A$status
-  timeA2 <- untreat.A$time
-  statusA2 <- untreat.A$status
+  TimeA1 <- treat.A$time
+  StatusA1 <- treat.A$status
+  TimeA2 <- untreat.A$time
+  StatusA2 <- untreat.A$status
   
+  # untreated eyes
+  treat.Y <- subset(diabetesY,trt==1)
+  untreat.Y <- subset(diabetesY,trt==0)
   
-  treat.Y <- diabetesY[2*(1:114)-1,]
-  untreat.Y <- diabetesY[2*(1:114),]
+  TimeY1 <- treat.Y$time
+  StatusY1 <- treat.Y$status
+  TimeY2 <- untreat.Y$time
+  StatusY2 <- untreat.Y$status
   
-  timeY1 <- treat.Y$time
-  statusY1 <- treat.Y$status
-  timeY2 <- untreat.Y$time
-  statusY2 <- untreat.Y$status
-  
+  # Results
+  # two-sided analysis
   set.seed(1234)
-  rel_treat_eff(length(timeA1), timeA1, statusA1, timeA2, statusA2, tau=60, BS.iter=2000)
+  res_A <- rel_treat_eff.new(length(TimeA1), TimeA1, StatusA1, TimeA2, StatusA2, tau=60, BS.iter=2000, test.bool=T, ci.bool=T, alt="two.sided")
+  res_A
   set.seed(1234)
-  rel_treat_eff(length(timeY1), timeY1, statusY1, timeY2, statusY2, tau=60, BS.iter=2000)
+  res_Y <- rel_treat_eff.new(length(TimeY1), TimeY1, StatusY1, TimeY2, StatusY2, tau=60, BS.iter=2000, test.bool=T, ci.bool=T, alt="two.sided")
+  res_Y
+  
+  # one-sided analysis (right-tailed / upper confidence interval)
+  set.seed(1234)
+  res_A <- rel_treat_eff.new(length(TimeA1), TimeA1, StatusA1, TimeA2, StatusA2, tau=60, BS.iter=2000, test.bool=T, ci.bool=T, alt="greater")
+  res_A
+  set.seed(1234)
+  res_Y <- rel_treat_eff.new(length(TimeY1), TimeY1, StatusY1, TimeY2, StatusY2, tau=60, BS.iter=2000, test.bool=T, ci.bool=T, alt="greater")
+  res_Y
+  
+  # one-sided analysis (left-tailed / lower confidence interval)
+  set.seed(1234)
+  res_A <- rel_treat_eff.new(length(TimeA1), TimeA1, StatusA1, TimeA2, StatusA2, tau=60, BS.iter=2000, test.bool=T, ci.bool=T, alt="less")
+  res_A
+  set.seed(1234)
+  res_Y <- rel_treat_eff.new(length(TimeY1), TimeY1, StatusY1, TimeY2, StatusY2, tau=60, BS.iter=2000, test.bool=T, ci.bool=T, alt="less")
+  res_Y
 }
