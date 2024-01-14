@@ -99,7 +99,9 @@ rte <- function(dataf){
 #             Either of "two.sided" (default), "greater", or "less".
 #             For more details, see the functions  one.test()  and  one.ci()  below.
 #
-rel_treat_eff.new <- function(n, times1, cens1, times2, cens2, tau, alpha=0.05, BS.iter=100, test.bool=FALSE, ci.bool=FALSE, alt="two.sided"){
+rel_treat_eff.new <- function(n, times1, cens1, times2, cens2, tau, alpha=0.05,
+                              rte_hyp=0.5, BS.iter=100, test.bool=FALSE, 
+                              ci.bool=FALSE, alt="two.sided"){
   dataset <- paired2CR.new(n, times1, cens1, times2, cens2, tau)
   dataset <- dataset[order(dataset$time),]
   
@@ -114,24 +116,63 @@ rel_treat_eff.new <- function(n, times1, cens1, times2, cens2, tau, alpha=0.05, 
     return(rte_cov)
   }
 
-  if(rte_cov[1]<0.000001)  return(list(RTE=rte_cov[1], RTE.var=0, 
-                                       p.val.gauss=1, CI.gauss = c(0, 0), 
-                                       p.val.rand=1, CI.rand = c(0, 0),
-                                       p.val.bs=1, CI.bs = c(0, 0),
-                                       p.val.phi.gauss=1, CI.phi.gauss = c(0, 0), 
-                                       p.val.phi.rand=1, CI.phi.rand = c(0, 0),
-                                       p.val.phi.bs=1, CI.phi.bs = c(0, 0)))
+  if((rte_cov[1]<0.000001) & (alt %in% c("g", "greater")))  
+    return(list(RTE=rte_cov[1], RTE.var=0, 
+       p.val.gauss=1, CI.gauss = c(0, 0), 
+       p.val.rand=1, CI.rand = c(0, 0),
+       p.val.bs=1, CI.bs = c(0, 0),
+       p.val.phi.gauss=1, CI.phi.gauss = c(0, 0), 
+       p.val.phi.rand=1, CI.phi.rand = c(0, 0),
+       p.val.phi.bs=1, CI.phi.bs = c(0, 0)))
   
-  if(abs(rte_cov[1]-1)<0.000001)  return(list(RTE=rte_cov[1], RTE.var=0, 
-                                              p.val.gauss=0, CI.gauss = c(1, 1), 
-                                              p.val.rand=0, CI.rand = c(1, 1),
-                                              p.val.bs=0, CI.bs = c(1, 1),
-                                              p.val.phi.gauss=0, CI.phi.gauss = c(1, 1), 
-                                              p.val.phi.rand=0, CI.phi.rand = c(1, 1),
-                                              p.val.phi.bs=0, CI.phi.bs = c(1, 1)))
+  if((rte_cov[1]<0.000001) & (alt %in% c("l", "less")))  
+    return(list(RTE=rte_cov[1], RTE.var=0, 
+      p.val.gauss=0, CI.gauss = c(0, 0), 
+      p.val.rand=0, CI.rand = c(0, 0),
+      p.val.bs=0, CI.bs = c(0, 0),
+      p.val.phi.gauss=0, CI.phi.gauss = c(0, 0), 
+      p.val.phi.rand=0, CI.phi.rand = c(0, 0),
+      p.val.phi.bs=0, CI.phi.bs = c(0, 0)))
+  
+  if((rte_cov[1]<0.000001) & (alt == "two.sided"))  
+    return(list(RTE=rte_cov[1], RTE.var=0, 
+                p.val.gauss=0, CI.gauss = c(0, 0), 
+                p.val.rand=0, CI.rand = c(0, 0),
+                p.val.bs=0, CI.bs = c(0, 0),
+                p.val.phi.gauss=0, CI.phi.gauss = c(0, 0), 
+                p.val.phi.rand=0, CI.phi.rand = c(0, 0),
+                p.val.phi.bs=0, CI.phi.bs = c(0, 0)))
+  
+  return(list(RTE=rte_cov[1], RTE.var=0, 
+              p.val.gauss=0, CI.gauss = c(1, 1), 
+              p.val.rand=0, CI.rand = c(1, 1),
+              p.val.bs=0, CI.bs = c(1, 1),
+              p.val.phi.gauss=0, CI.phi.gauss = c(1, 1), 
+              p.val.phi.rand=0, CI.phi.rand = c(1, 1),
+              p.val.phi.bs=0, CI.phi.bs = c(1, 1)))
+  
+  if((abs(rte_cov[1]-1)<0.000001) & (alt %in% c("g", "greater")))  
+    return(list(RTE=rte_cov[1], RTE.var=0, 
+      p.val.gauss=0, CI.gauss = c(1, 1), 
+      p.val.rand=0, CI.rand = c(1, 1),
+      p.val.bs=0, CI.bs = c(1, 1),
+      p.val.phi.gauss=0, CI.phi.gauss = c(1, 1), 
+      p.val.phi.rand=0, CI.phi.rand = c(1, 1),
+      p.val.phi.bs=0, CI.phi.bs = c(1, 1)))
+  
+  if((abs(rte_cov[1]-1)<0.000001) & (alt == "two.sided"))  
+    return(list(RTE=rte_cov[1], RTE.var=0, 
+                p.val.gauss=0, CI.gauss = c(1, 1), 
+                p.val.rand=0, CI.rand = c(1, 1),
+                p.val.bs=0, CI.bs = c(1, 1),
+                p.val.phi.gauss=0, CI.phi.gauss = c(1, 1), 
+                p.val.phi.rand=0, CI.phi.rand = c(1, 1),
+                p.val.phi.bs=0, CI.phi.bs = c(1, 1)))
+  
   
   # randomization
   rand_p <- replicate(BS.iter, rand_rel_treat_eff.new(dataset))
+
   # bootstrap
   bs_p <- replicate(BS.iter, bs_rel_treat_eff.new(dataset, n, rte_cov[1]))
   
@@ -156,11 +197,11 @@ rel_treat_eff.new <- function(n, times1, cens1, times2, cens2, tau, alpha=0.05, 
   
   
   if(test.bool){
-    T_0 <- (rte_cov[1]-0.5)/sqrt(rte_cov[2])
+    T_0 <- (rte_cov[1]-rte_hyp)/sqrt(rte_cov[2])
     
     # the studentization with 0.5*log(0.5) is probably much better than p*log(p)
     # otherwise, for small or large values of p the test statistic could tend to have small values.
-    T_phi <- (log(-log(rte_cov[1]))-log(-log(0.5)))/sqrt(rte_cov[2])*rte_cov[1]*log(rte_cov[1])
+    T_phi <- (log(-log(rte_cov[1]))-log(-log(rte_hyp)))/sqrt(rte_cov[2])*rte_cov[1]*log(rte_cov[1])
     
     if(alt=="greater"  | alt=="g"){
       # 1-sided p-values (right-tailed)
@@ -273,10 +314,10 @@ rand_rel_treat_eff.new <- function(dataset){
 
 # function to bootstrap the dataset and then compute the normalized relative treatment effect
 bs_rel_treat_eff.new <- function(dataset, n, p){
-  dataset <- dataset[sample(1:n,n,replace=TRUE),]
-  dataset <- dataset[order(dataset$time),]
-  rte_cov <- rte(dataset)
-
+  dataset.bs <- dataset[sample(1:n,n,replace=TRUE),]
+  dataset.bs <- dataset.bs[order(dataset.bs$time),]
+  rte_cov <- rte(dataset.bs)
+  
   # If relative treatment effect is very close to 0 or 1.
   if(is.na((log(-log(rte_cov[1]))-log(-log(p)))/sqrt(rte_cov[2])*rte_cov[1]*log(rte_cov[1]))){
     if(abs(rte_cov[2])<0.000001){
@@ -307,7 +348,7 @@ dataGen <- function(n, setting){
               rCopula(n, copula=claytonCopula(setting[2])),
               matrix(runif(2*n),nc=2)
   )
-  Z <- rbind(Z, cbind(runif(n), rep(0,n)), cbind(rep(0,n), runif(n)))
+  Z <- rbind(Z, cbind(runif(0), rep(0,0)), cbind(rep(0,0), runif(0)))
   
   rootGompertz <- c(3.02949, 3.1625, 1)
   qGompertzRoot <- function(z, shape=0.6, scale=rootGompertz[setting[1]]) return(log(1-1/shape*log(1-z))/scale)  
