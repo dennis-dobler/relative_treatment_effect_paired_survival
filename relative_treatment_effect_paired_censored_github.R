@@ -143,13 +143,14 @@ rel_treat_eff.new <- function(n, times1, cens1, times2, cens2, tau, alpha=0.05,
                 p.val.phi.rand=0, CI.phi.rand = c(0, 0),
                 p.val.phi.bs=0, CI.phi.bs = c(0, 0)))
   
-  return(list(RTE=rte_cov[1], RTE.var=0, 
-              p.val.gauss=0, CI.gauss = c(1, 1), 
-              p.val.rand=0, CI.rand = c(1, 1),
-              p.val.bs=0, CI.bs = c(1, 1),
-              p.val.phi.gauss=0, CI.phi.gauss = c(1, 1), 
-              p.val.phi.rand=0, CI.phi.rand = c(1, 1),
-              p.val.phi.bs=0, CI.phi.bs = c(1, 1)))
+   if((abs(rte_cov[1]-1)<0.000001) & (alt %in% c("l", "less")))
+    return(list(RTE=rte_cov[1], RTE.var=0,
+              p.val.gauss=1, CI.gauss = c(1, 1),
+              p.val.rand=1, CI.rand = c(1, 1),
+              p.val.bs=1, CI.bs = c(1, 1),
+              p.val.phi.gauss=1, CI.phi.gauss = c(1, 1),
+              p.val.phi.rand=1, CI.phi.rand = c(1, 1),
+              p.val.phi.bs=1, CI.phi.bs = c(1, 1)))
   
   if((abs(rte_cov[1]-1)<0.000001) & (alt %in% c("g", "greater")))  
     return(list(RTE=rte_cov[1], RTE.var=0, 
