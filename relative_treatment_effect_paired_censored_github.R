@@ -258,9 +258,9 @@ rel_treat_eff.new <- function(n, times1, cens1, times2, cens2, tau, alpha=0.05,
       CI_rand_upper <- rte_cov[1] - quantile(rand_p[1,], prob=alpha)*sqrt(rte_cov[2])
       CI_bs_upper <- rte_cov[1] - quantile(bs_p[1,], prob=alpha)*sqrt(rte_cov[2])
       
-      CI_phi_gauss_upper <- rte_cov[1]^exp(qnorm(1-alpha/2)*sqrt(rte_cov[2])/rte_cov[1]/log(rte_cov[1]))
-      CI_phi_rand_upper <- rte_cov[1]^exp(-quantile(rand_p[2,], prob=alpha/2)*sqrt(rte_cov[2])/rte_cov[1]/log(rte_cov[1]))
-      CI_phi_bs_upper <- rte_cov[1]^exp(-quantile(bs_p[2,], prob=alpha/2)*sqrt(rte_cov[2])/rte_cov[1]/log(rte_cov[1]))
+      CI_phi_gauss_upper <- rte_cov[1]^exp(qnorm(1-alpha)*sqrt(rte_cov[2])/rte_cov[1]/log(rte_cov[1]))
+      CI_phi_rand_upper <- rte_cov[1]^exp(-quantile(rand_p[2,], prob=alpha)*sqrt(rte_cov[2])/rte_cov[1]/log(rte_cov[1]))
+      CI_phi_bs_upper <- rte_cov[1]^exp(-quantile(bs_p[2,], prob=alpha)*sqrt(rte_cov[2])/rte_cov[1]/log(rte_cov[1]))
     }
     
     if(alt=="two.sided"){
